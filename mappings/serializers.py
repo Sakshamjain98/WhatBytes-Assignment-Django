@@ -10,7 +10,7 @@ class OwnPatientField(serializers.PrimaryKeyRelatedField):
     """Only accept patients created by the requesting user."""
 
     def get_queryset(self):
-        return Patient.objects.filter(created_by=self.context["request"].user)
+        return Patient.objects.owned_by(self.context["request"].user)
 
 
 class MappingSerializer(serializers.ModelSerializer):

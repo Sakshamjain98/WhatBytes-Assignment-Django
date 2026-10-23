@@ -9,9 +9,10 @@ class PatientViewSet(viewsets.ModelViewSet):
 
     serializer_class = PatientSerializer
     http_method_names = ["get", "post", "put", "delete"]
+    lookup_value_converter = "int"
 
     def get_queryset(self):
-        return Patient.objects.filter(created_by=self.request.user)
+        return Patient.objects.owned_by(self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)

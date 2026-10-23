@@ -4,11 +4,18 @@ from doctors.models import Doctor
 from patients.models import Patient
 
 
+class MappingQuerySet(models.QuerySet):
+    def owned_by(self, user):
+        return self.filter(patient__created_by=user).select_related("patient", "doctor")
+
+
 class PatientDoctorMapping(models.Model):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="doctor_mappings")
     doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE, related_name="patient_mappings")
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = MappingQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at"]

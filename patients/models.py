@@ -5,6 +5,11 @@ from django.db import models
 phone_validator = RegexValidator(r"^\+?\d{7,15}$", "Enter a valid phone number (7-15 digits, optional leading +).")
 
 
+class PatientQuerySet(models.QuerySet):
+    def owned_by(self, user):
+        return self.filter(created_by=user)
+
+
 class Patient(models.Model):
     class Gender(models.TextChoices):
         MALE = "male", "Male"
@@ -21,6 +26,8 @@ class Patient(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="patients")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = PatientQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at"]

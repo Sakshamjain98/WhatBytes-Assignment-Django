@@ -12,6 +12,7 @@ Built for the WhatBytes Full-stack Developer Internship assignment.
 | Auth           | JWT via `djangorestframework-simplejwt`   |
 | Database       | PostgreSQL 16 (via `psycopg` 3)           |
 | Config         | Environment variables (`.env` + `python-dotenv`) |
+| API docs       | OpenAPI 3 via `drf-spectacular` (Swagger UI + ReDoc) |
 | Python         | 3.10+ (developed on 3.12)                 |
 
 ## Project structure
@@ -25,14 +26,36 @@ Built for the WhatBytes Full-stack Developer Internship assignment.
 ├── mappings/               # Patient <-> Doctor assignments
 ├── docs/
 │   └── healthcare-api.postman_collection.json
-├── docker-compose.yml      # Local PostgreSQL
+├── Dockerfile              # API image
+├── docker-compose.yml      # PostgreSQL + API
 ├── requirements.txt
 └── .env.example            # Copy to .env
 ```
 
-Each app follows the same layout: `models.py`, `serializers.py`, `views.py`, `urls.py`, `admin.py`, `tests.py`.
+Each app follows the same layered layout:
 
-## Getting started
+| Layer | File | Role |
+| ----- | ---- | ---- |
+| Model | `models.py` | Database schema (Django ORM) |
+| Repository | `models.py` → custom `QuerySet` (e.g. `Patient.objects.owned_by(user)`) | All ownership-scoped queries in one place |
+| DTO | `serializers.py` | Request validation + response shape; models never leak to the client directly |
+| Controller | `views.py` | HTTP only: auth, permissions, status codes |
+| Routing | `urls.py` | URL → view |
+| Tests | `tests.py` | API-level tests against PostgreSQL |
+
+## Quick start (Docker, one command)
+
+```bash
+cp .env.example .env          # then set DJANGO_SECRET_KEY and POSTGRES_PASSWORD
+docker compose up --build     # PostgreSQL + API, migrations run automatically
+```
+
+- API: http://localhost:8000/api/
+- Swagger UI: http://localhost:8000/api/docs/ (click **Authorize**, paste the `access` token from login)
+- ReDoc: http://localhost:8000/api/redoc/
+- OpenAPI schema: http://localhost:8000/api/schema/
+
+## Getting started (local Python)
 
 ### 1. Clone and install
 
@@ -76,7 +99,7 @@ The app refuses to start if a required variable is missing.
 With Docker (uses the credentials from `.env`):
 
 ```bash
-docker compose up -d
+docker compose up -d db
 ```
 
 Or use an existing PostgreSQL server and create a database/user that match your `.env`.
@@ -89,7 +112,7 @@ python manage.py createsuperuser   # optional, for /admin/
 python manage.py runserver
 ```
 
-The API is now at `http://localhost:8000/api/`, and the Django admin is at `http://localhost:8000/admin/`.
+The API is now at `http://localhost:8000/api/`, Swagger UI at `http://localhost:8000/api/docs/`, and the Django admin at `http://localhost:8000/admin/`.
 
 ## Authentication
 
