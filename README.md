@@ -38,10 +38,13 @@ Each app follows the same layered layout:
 | ----- | ---- | ---- |
 | Model | `models.py` | Database schema (Django ORM) |
 | Repository | `models.py` → custom `QuerySet` (e.g. `Patient.objects.owned_by(user)`) | All ownership-scoped queries in one place |
-| DTO | `serializers.py` | Request validation + response shape; models never leak to the client directly |
+| Service | `services.py` (accounts, mappings) | Business rules that aren't plain CRUD: issuing tokens, the duplicate-assignment check |
+| DTO | `serializers.py` | Request validation + response shape; unknown request fields are rejected (`config/serializers.py`) |
 | Controller | `views.py` | HTTP only: auth, permissions, status codes |
 | Routing | `urls.py` | URL → view |
-| Tests | `tests.py` | API-level tests against PostgreSQL |
+| Tests | `tests.py` | API tests + service tests against PostgreSQL |
+
+Shared plumbing lives in `config/`: error format (`exceptions.py`), pagination (`pagination.py`), request ID and body-size middleware (`middleware.py`, `log.py`), health check and JSON 404/500 (`views.py`).
 
 ## Quick start (Docker, one command)
 
@@ -54,6 +57,9 @@ docker compose up --build     # PostgreSQL + API, migrations run automatically
 - Swagger UI: http://localhost:8000/api/docs/ (click **Authorize**, paste the `access` token from login)
 - ReDoc: http://localhost:8000/api/redoc/
 - OpenAPI schema: http://localhost:8000/api/schema/
+- Health check: http://localhost:8000/health/ (includes database status)
+
+The container runs gunicorn (3 workers), serves static files with whitenoise, runs as a non-root user and has a Docker health check.
 
 ## Getting started (local Python)
 
@@ -89,9 +95,13 @@ python -c "import secrets; print(secrets.token_urlsafe(50))"   # use as DJANGO_S
 | `POSTGRES_PASSWORD`    | yes      | –                     | Database password                   |
 | `POSTGRES_HOST`        | no       | `localhost`           | Database host                       |
 | `POSTGRES_PORT`        | no       | `5432`                | Database port                       |
-| `JWT_ACCESS_MINUTES`   | no       | `60`                  | Access token lifetime (minutes)     |
-| `JWT_REFRESH_DAYS`     | no       | `1`                   | Refresh token lifetime (days)       |
-
+| `JWT_ACCESS_MINUTES`   | no       | `15`                  | Access token lifetime (minutes)     |
+| `JWT_REFRESH_DAYS`     | no       | `7`                   | Refresh token lifetime (days)       |
+| `AUTH_THROTTLE_RATE`   | no       | `10/min`              | Per-IP limit on login/register      |
+| `CORS_ALLOWED_ORIGINS` | no       | (none)                | Comma-separated frontend origins    |
+| `LOG_LEVEL`            | no       | `INFO`                | Root log level                      |
+| `DJANGO_SECURE_SSL_REDIRECT` | no | `True`                | HTTPS redirect (only when `DEBUG=False`) |
+| `DJANGO_HSTS_SECONDS`  | no       | `31536000`            | HSTS max-age (only when `DEBUG=False`) |
 The app refuses to start if a required variable is missing.
 
 ### 3. Start PostgreSQL
@@ -108,6 +118,7 @@ Or use an existing PostgreSQL server and create a database/user that match your 
 
 ```bash
 python manage.py migrate
+python manage.py createcachetable   # shared cache used by rate limiting
 python manage.py createsuperuser   # optional, for /admin/
 python manage.py runserver
 ```
@@ -124,13 +135,19 @@ The API is now at `http://localhost:8000/api/`, Swagger UI at `http://localhost:
 Authorization: Bearer <access token>
 ```
 
-When the access token expires, exchange the refresh token at `POST /api/auth/token/refresh/`.
+When the access token expires, exchange the refresh token at `POST /api/auth/token/refresh/`. To log out, send the refresh token to `POST /api/auth/logout/`. Login and register are rate-limited per IP (`429` after 10/min by default).
 
 All patient, doctor, and mapping endpoints require authentication. Requests without a valid token get `401`.
 
 ## API reference
 
-Base URL: `http://localhost:8000`. List endpoints are paginated (20 per page, `?page=N`) and return `{count, next, previous, results}`.
+Base URL: `http://localhost:8000`. Request bodies are JSON, at most 100 KB, and unknown fields are rejected with `400`.
+
+**Pagination.** Every list endpoint takes `?page=N&limit=M` (`limit` 1–100, default 20) and returns:
+
+```json
+{ "data": [ ... ], "meta": { "page": 1, "limit": 20, "total": 42, "total_pages": 3 } }
+```
 
 ### Auth
 
@@ -138,7 +155,8 @@ Base URL: `http://localhost:8000`. List endpoints are paginated (20 per page, `?
 | ------ | -------------------------- | ---- | ------------------------------ |
 | POST   | `/api/auth/register/`      | No   | Register with name, email, password |
 | POST   | `/api/auth/login/`         | No   | Get JWT access + refresh tokens |
-| POST   | `/api/auth/token/refresh/` | No   | Get a new access token          |
+| POST   | `/api/auth/token/refresh/` | No   | Get a new access + refresh token (the old refresh token is blacklisted) |
+| POST   | `/api/auth/logout/`        | No   | Blacklist a refresh token (`{"refresh": "..."}`) |
 
 **Register**
 
@@ -148,10 +166,10 @@ POST /api/auth/register/
 ```
 ```json
 201 Created
-{ "id": 1, "name": "Saksham Jain", "email": "saksham@example.com" }
+{ "user": { "id": 1, "name": "Saksham Jain", "email": "saksham@example.com" }, "access": "eyJhbGciOi...", "refresh": "eyJhbGciOi..." }
 ```
 
-Emails are case-insensitive and unique. Passwords go through Django's password validators (minimum length, not too common, not all numeric, not too similar to name/email).
+Registering also logs you in. Emails are case-insensitive and unique (a duplicate returns `409`). Passwords go through Django's password validators (minimum length, not too common, not all numeric, not too similar to name/email).
 
 **Login**
 
@@ -161,7 +179,7 @@ POST /api/auth/login/
 ```
 ```json
 200 OK
-{ "refresh": "eyJhbGciOi...", "access": "eyJhbGciOi..." }
+{ "user": { "id": 1, "name": "Saksham Jain", "email": "saksham@example.com" }, "access": "eyJhbGciOi...", "refresh": "eyJhbGciOi..." }
 ```
 
 ### Patients
@@ -172,6 +190,7 @@ POST /api/auth/login/
 | GET    | `/api/patients/`      | List patients **created by the current user**  |
 | GET    | `/api/patients/<id>/` | Patient details                                |
 | PUT    | `/api/patients/<id>/` | Update a patient (full update)                 |
+| PATCH  | `/api/patients/<id>/` | Update some fields                             |
 | DELETE | `/api/patients/<id>/` | Delete a patient                               |
 
 ```http
@@ -189,7 +208,7 @@ POST /api/patients/
 ```json
 201 Created
 {
-  "id": 1, "name": "Ravi Kumar", "date_of_birth": "1990-05-14", "gender": "male",
+  "id": 1, "name": "Ravi Kumar", "date_of_birth": "1990-05-14", "age": 36, "gender": "male",
   "phone": "+919876543210", "email": "ravi@example.com", "address": "Ghaziabad, UP",
   "medical_history": "Mild asthma", "created_by": "saksham@example.com",
   "created_at": "2026-10-22T16:11:28.524831Z", "updated_at": "2026-10-22T16:11:28.524834Z"
@@ -198,6 +217,7 @@ POST /api/patients/
 
 - Required fields: `name`, `date_of_birth` (YYYY-MM-DD, not in the future), `gender` (`male` | `female` | `other`), and `phone` (7–15 digits, optional leading `+`).
 - Optional fields: `email`, `address`, `medical_history`.
+- `age` is read-only and computed from `date_of_birth`.
 - Patients are private to their creator. Another user's patient id returns `404`, so the API doesn't reveal that the record exists.
 
 ### Doctors
@@ -208,6 +228,7 @@ POST /api/patients/
 | GET    | `/api/doctors/`      | List **all** doctors                 |
 | GET    | `/api/doctors/<id>/` | Doctor details                       |
 | PUT    | `/api/doctors/<id>/` | Update a doctor (creator only)       |
+| PATCH  | `/api/doctors/<id>/` | Update some fields (creator only)    |
 | DELETE | `/api/doctors/<id>/` | Delete a doctor (creator only)       |
 
 ```http
@@ -249,33 +270,46 @@ POST /api/mappings/
 }
 ```
 
-`GET /api/mappings/1/` returns a list of doctor objects (same shape as `/api/doctors/<id>/`).
+`GET /api/mappings/1/` returns a paginated list of doctor objects (same shape as `/api/doctors/<id>/`), each with `mapping_id` (use it to `DELETE`) and `assigned_at`.
 
 - You can only assign doctors to **your own** patients. Another user's patient id is rejected with `400`.
-- Assigning the same doctor to the same patient twice returns `400`. A database unique constraint also enforces this.
+- Assigning the same doctor to the same patient twice returns `409`. A database unique constraint also enforces this.
 - Deleting a patient or doctor also removes their mappings.
 
 ## Error handling
 
-Errors are always JSON, with an HTTP status that matches the problem:
+Every error has the same JSON shape:
 
-| Status | When                                   | Example body                                                   |
-| ------ | -------------------------------------- | -------------------------------------------------------------- |
-| 400    | Validation failed / malformed JSON     | `{"phone": ["Enter a valid phone number (7-15 digits, optional leading +)."]}` |
-| 401    | Missing, invalid, or expired token; wrong login | `{"detail": "Authentication credentials were not provided."}` |
-| 403    | Modifying a doctor you didn't create   | `{"detail": "Only the user who created this record can modify or delete it."}` |
-| 404    | Record doesn't exist or isn't yours    | `{"detail": "No Patient matches the given query."}`            |
-| 405    | Unsupported method (e.g. `PATCH`)      | `{"detail": "Method \"PATCH\" not allowed."}`                  |
-| 409    | Database conflict (e.g. a race on a unique field) | `{"detail": "This record conflicts with an existing one."}` |
-| 500    | Unexpected error (logged server-side)  | `{"detail": "Internal server error."}`                         |
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "details": [{ "field": "phone", "message": "Enter a valid phone number (7-15 digits, optional leading +)." }]
+  }
+}
+```
 
-Validation errors are keyed by field name, so a client can show each error next to its form input.
+`details` is only present for validation errors. `field` is `null` for errors that aren't about one field (e.g. a weak password).
+
+| Status | `code`                   | When                                                     |
+| ------ | ------------------------ | -------------------------------------------------------- |
+| 400    | `VALIDATION_ERROR`       | Invalid or unknown fields                                |
+| 400    | `BAD_REQUEST`            | Malformed JSON                                           |
+| 401    | `UNAUTHORIZED`           | Missing, invalid or expired token; wrong login           |
+| 403    | `FORBIDDEN`              | Modifying a doctor you didn't create                     |
+| 404    | `NOT_FOUND`              | Record doesn't exist or isn't yours; unknown route       |
+| 405    | `METHOD_NOT_ALLOWED`     | Unsupported method                                       |
+| 409    | `CONFLICT`               | Email already registered; doctor already assigned        |
+| 413    | `PAYLOAD_TOO_LARGE`      | Body over 100 KB                                         |
+| 429    | `TOO_MANY_REQUESTS`      | Too many login/register attempts                         |
+| 500    | `INTERNAL_ERROR`         | Unexpected error (logged server-side, no details leaked) |
 
 ## Testing
 
 ### Automated tests
 
-The suite has 17 tests covering auth, CRUD, validation, and cross-user access rules. It runs against PostgreSQL, so start the database first:
+The suite has 27 tests covering auth, logout, rate limiting, CRUD, validation, pagination, the error format, cross-user access rules, the services and the health check. GitHub Actions (`.github/workflows/ci.yml`) runs them on every push, along with `ruff` lint/format checks, the migration check and OpenAPI validation. Run the lint locally with `pip install ruff==0.14.1 && ruff check . && ruff format --check .`. It runs against PostgreSQL, so start the database first:
 
 ```bash
 python manage.py test
@@ -293,5 +327,7 @@ python manage.py test
 - **Custom user model with email login.** The spec registers users with name, email, and password, with no username. The custom model is defined before the first migration, as Django recommends.
 - **Patients are per-user and doctors are shared.** The spec says "retrieve all patients *created by the authenticated user*" but "retrieve *all* doctors", and the API follows that wording.
 - **Ownership is enforced in the queryset.** Patients and mappings are filtered by the current user, so another user's record behaves as if it doesn't exist (404).
-- **Only `PUT` updates, no `PATCH`.** The spec lists only `PUT`, which does a full update.
+- **`PUT` and `PATCH`.** The spec lists `PUT` (full update). `PATCH` is also allowed for partial updates.
+- **Production settings switch on with `DEBUG=False`.** HTTPS redirect, secure cookies and HSTS are enabled, and `manage.py check --deploy` reports no issues.
+- **Request IDs.** Every response carries `X-Request-Id` (reused if the client sends one), and every log line includes it.
 - **Secrets only in the environment.** `.env` is git-ignored and `.env.example` documents every variable.

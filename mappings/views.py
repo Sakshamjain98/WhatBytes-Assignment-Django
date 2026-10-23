@@ -1,15 +1,14 @@
+from django.db.models import F
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
-from rest_framework.views import APIView
 
 from doctors.models import Doctor
-from doctors.serializers import DoctorSerializer
 from patients.models import Patient
 
 from .models import PatientDoctorMapping
-from .serializers import MappingSerializer
+from .serializers import AssignedDoctorSerializer, MappingSerializer
 
 
 class MappingListCreateView(generics.ListCreateAPIView):
@@ -21,23 +20,31 @@ class MappingListCreateView(generics.ListCreateAPIView):
         return PatientDoctorMapping.objects.owned_by(self.request.user)
 
 
-class MappingDetailView(APIView):
+class MappingDetailView(generics.GenericAPIView):
     """
     The spec puts two different ids on the same URL:
       GET    /api/mappings/<patient_id>/  -> doctors assigned to that patient
       DELETE /api/mappings/<mapping_id>/  -> remove that mapping
     """
 
+    serializer_class = AssignedDoctorSerializer
+
     @extend_schema(
         operation_id="mappings_patient_doctors",
         summary="Doctors assigned to a patient",
         parameters=[OpenApiParameter("pk", int, OpenApiParameter.PATH, description="Patient id")],
-        responses=DoctorSerializer(many=True),
+        responses=AssignedDoctorSerializer(many=True),
     )
     def get(self, request, pk):
         patient = get_object_or_404(Patient.objects.owned_by(request.user), pk=pk)
-        doctors = Doctor.objects.filter(patient_mappings__patient=patient).select_related("created_by")
-        return Response(DoctorSerializer(doctors, many=True).data)
+        doctors = (
+            Doctor.objects.filter(patient_mappings__patient=patient)
+            .annotate(mapping_id=F("patient_mappings__id"), assigned_at=F("patient_mappings__created_at"))
+            .select_related("created_by")
+            .order_by("-assigned_at")
+        )
+        page = self.paginate_queryset(doctors)
+        return self.get_paginated_response(self.get_serializer(page, many=True).data)
 
     @extend_schema(
         summary="Remove a doctor from a patient",

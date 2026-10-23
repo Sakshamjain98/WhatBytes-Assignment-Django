@@ -11,7 +11,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
     queryset = Doctor.objects.select_related("created_by")
     serializer_class = DoctorSerializer
     permission_classes = [permissions.IsAuthenticated, IsCreatorOrReadOnly]
-    http_method_names = ["get", "post", "put", "delete"]
+    http_method_names = ["get", "post", "put", "patch", "delete"]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)

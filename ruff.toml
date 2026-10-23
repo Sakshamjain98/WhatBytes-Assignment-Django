@@ -1,0 +1,6 @@
+line-length = 130
+target-version = "py312"
+extend-exclude = [".venv", "*/migrations/*"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "DJ"]

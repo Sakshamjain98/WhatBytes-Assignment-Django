@@ -2,7 +2,13 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+from .views import health
+
+handler404 = "config.views.not_found"
+handler500 = "config.views.server_error"
+
 urlpatterns = [
+    path("health/", health, name="health"),
     path("admin/", admin.site.urls),
     path("api/auth/", include("accounts.urls")),
     path("api/patients/", include("patients.urls")),

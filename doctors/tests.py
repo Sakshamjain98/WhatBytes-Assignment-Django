@@ -2,11 +2,19 @@ from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from config.tests import error_fields
+
 from .models import Doctor
 
 User = get_user_model()
 
-DOCTOR = {"name": "Meera Shah", "specialization": "Cardiology", "email": "meera@clinic.com", "phone": "9876500000", "experience_years": 12}
+DOCTOR = {
+    "name": "Meera Shah",
+    "specialization": "Cardiology",
+    "email": "meera@clinic.com",
+    "phone": "9876500000",
+    "experience_years": 12,
+}
 
 
 class DoctorTests(APITestCase):
@@ -30,12 +38,12 @@ class DoctorTests(APITestCase):
         self.client.post("/api/doctors/", DOCTOR)
         res = self.client.post("/api/doctors/", {**DOCTOR, "experience_years": 200, "phone": "12"})
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(set(res.data), {"email", "experience_years", "phone"})
+        self.assertEqual(error_fields(res), {"email", "experience_years", "phone"})
 
     def test_all_doctors_visible_but_only_creator_can_modify(self):
         theirs = Doctor.objects.create(created_by=self.other, **DOCTOR)
         url = f"/api/doctors/{theirs.id}/"
-        self.assertEqual(self.client.get("/api/doctors/").data["count"], 1)
+        self.assertEqual(self.client.get("/api/doctors/").data["meta"]["total"], 1)
         self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
         self.assertEqual(self.client.put(url, DOCTOR).status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(self.client.delete(url).status_code, status.HTTP_403_FORBIDDEN)

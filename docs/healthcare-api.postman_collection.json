@@ -162,7 +162,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "const d = pm.response.json();",
-                  "if (d.access) pm.collectionVariables.set('accessToken', d.access);"
+                  "if (d.access) pm.collectionVariables.set('accessToken', d.access);",
+                  "if (d.refresh) pm.collectionVariables.set('refreshToken', d.refresh);"
                 ]
               }
             }
